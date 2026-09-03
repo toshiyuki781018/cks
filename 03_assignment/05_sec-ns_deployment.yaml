@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sec-ns
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secdep
+  namespace: sec-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: secdep
+  template:
+    metadata:
+      labels:
+        app: secdep
+    spec:
+      containers:
+      - name: sec-ctx-demo-1
+        image: busybox:1.28
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - sleep 12h
+        volumeMounts:
+        - name: sec-ctx-vol-1
+          mountPath: /data/demo1
+
+      - name: sec-ctx-demo-2
+        image: busybox:1.28
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - sleep 12h
+        volumeMounts:
+        - name: sec-ctx-vol-2
+          mountPath: /data/demo2
+
+      volumes:
+      - name: sec-ctx-vol-1
+        emptyDir: {}
+      - name: sec-ctx-vol-2
+        emptyDir: {}
