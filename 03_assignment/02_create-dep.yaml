@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: clever-cactus
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clever-cactus
+  namespace: clever-cactus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clever-cactus
+  template:
+    metadata:
+      labels:
+        app: clever-cactus
+    spec:
+      containers:
+      - name: clever-cactus
+        image: nginx:1.27
+        ports:
+        - containerPort: 443
+
+        volumeMounts:
+        - name: tls-certificate
+          mountPath: /etc/nginx/tls/tls.crt
+          subPath: tls.crt
+          readOnly: true
+
+        - name: tls-key
+          mountPath: /etc/nginx/tls/tls.key
+          subPath: tls.key
+          readOnly: true
+
+      volumes:
+      - name: tls-certificate
+        secret:
+          secretName: clever-cactus
+
+      - name: tls-key
+        secret:
+          secretName: clever-cactus
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clever-cactus
+  namespace: clever-cactus
+spec:
+  selector:
+    app: clever-cactus
+  ports:
+  - port: 443
+    targetPort: 443
