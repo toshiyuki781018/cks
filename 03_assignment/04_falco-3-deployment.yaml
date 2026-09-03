@@ -1,0 +1,108 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dev-mem-simulator
+  namespace: default
+data:
+  mem: |
+    simulated-memory-data
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: amd-gpu
+  namespace: default
+  labels:
+    app: amd-gpu
+    app.kubernetes.io/part-of: ollama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: amd-gpu
+  template:
+    metadata:
+      labels:
+        app: amd-gpu
+        app.kubernetes.io/part-of: ollama
+    spec:
+      containers:
+      - name: amd-gpu
+        image: busybox:1.36
+        command:
+        - /bin/sh
+        - -c
+        - |
+          while true; do
+            sleep 30
+          done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cpu
+  namespace: default
+  labels:
+    app: cpu
+    app.kubernetes.io/part-of: ollama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cpu
+  template:
+    metadata:
+      labels:
+        app: cpu
+        app.kubernetes.io/part-of: ollama
+    spec:
+      containers:
+      - name: cpu
+        image: busybox:1.36
+        command:
+        - /bin/sh
+        - -c
+        - |
+          while true; do
+            cat /dev/mem > /dev/null
+            sleep 2
+          done
+        volumeMounts:
+        - name: simulated-memory
+          mountPath: /dev/mem
+          subPath: mem
+          readOnly: true
+      volumes:
+      - name: simulated-memory
+        configMap:
+          name: dev-mem-simulator
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nvidia-gpu
+  namespace: default
+  labels:
+    app: nvidia-gpu
+    app.kubernetes.io/part-of: ollama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nvidia-gpu
+  template:
+    metadata:
+      labels:
+        app: nvidia-gpu
+        app.kubernetes.io/part-of: ollama
+    spec:
+      containers:
+      - name: nvidia-gpu
+        image: busybox:1.36
+        command:
+        - /bin/sh
+        - -c
+        - |
+          while true; do
+            sleep 30
+          done
