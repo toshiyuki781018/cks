@@ -1,247 +1,283 @@
-# 問題04：不審なコンテナの実行を検知し封じ込める ― 解説・模範解答
+# 問題03：不審なファイルアクセスを検出する ― 解説・模範解答
 
 ## この問題では何を考えればよかったのか
 
-この問題では、Runtimeで発生している不審なアクセスをFalcoで検知し、  
-その結果を根拠として停止対象を特定します。
+この問題では、実行中のコンテナで発生する不審なファイルアクセスをFalcoで検出できるようにします。  
+重要なのは、Falco Ruleの書式そのものを暗記することではありません。
 
-重要なのは、
-
-```text
-怪しそうなDeploymentを探す
-        ↓
-停止する
-```
-
-ではありません。
-
-今回の正しい流れは、
+まず、セキュリティ要件を整理します。
 
 ```text
-不審なアクセスがある
-        ↓
-何を観測するか決める
-        ↓
+検出したいこと
+ ↓
 /dev/memへのアクセス
-        ↓
-Falcoで検知
-        ↓
-Container IDを取得
-        ↓
-コンテナからPodを特定
-        ↓
-PodからDeploymentを特定
-        ↓
-対象Deploymentを停止
+
+何を観測するか
+ ↓
+アクセスされたファイル
+
+何を条件にするか
+ ↓
+ファイル名
+
+検出後に何をしたいか
+ ↓
+対象コンテナを調査する
+
+何を記録するか
+ ↓
+Container ID
 ```
 
-です。
-
-つまり、**検知 → 証拠取得 → 特定 → 封じ込め**  
-というRuntime Securityの基本的な流れを扱う問題です。
+これをFalco Ruleへ変換します。
 
 ---
 
-# 問題文を整理する
+# Falcoは何をするためのものか
 
-今回わかっていることは次の通りです。
+SecurityContextなどは、
 
 ```text
-不審な動作が発生している
+Workloadができることを制限する
+```
+
+ための設定です。
+
+一方、FalcoはRuntime Securityの観点から、
+
+```text
+Workloadが実行中に
+実際に何をしたか
         ↓
-/dev/memへアクセスしている
+Runtime Eventを観測
         ↓
-どのPodかは不明
+Ruleと照合
+        ↓
+異常な行動を検出
 ```
 
-また、複数のDeploymentが存在しています。
+するために使用できます。
 
-そのため、
+今回の問題では、
 
 ```text
-Deployment名
+/dev/memへアクセスした
 ```
 
-だけを見て停止対象を決めることはできません。
-
-まずFalcoを使って、
-
-```text
-/dev/memへアクセスした実行主体
-```
-
-を観測する必要があります。
+という行動を異常として扱います。
 
 ---
 
-# なぜ `/dev/mem` が問題なのか
+# 既存ルールを確認する
 
-今回の検知対象は、
-
-```text
-/dev/mem
-```
-
-です。
-
-`/dev/mem`は、システムの物理メモリへアクセスするためのデバイスファイルです。  
-そのため、Pod内のプロセスがこのファイルへアクセスしている場合、
-
-```text
-コンテナ
-   ↓
-/dev/mem
-   ↓
-Nodeのシステムメモリ
-```
-
-という通常のアプリケーション処理では想定しにくいアクセスが発生していると考えられます。  
-今回の問題では、このアクセスをRuntime上の観測点として使用します。
-
----
-
-# 設計の順番
-
-## 1. Falcoのルールファイルを確認する
-
-Falcoの設定ディレクトリを確認します。
+Falco固有のRule構文をすべて記憶している必要はありません。  
+まず既存ルールから、似た条件や出力方法を探します。
 
 ```bash
-sudo -i
-
-cd /etc/falco
-ls
+grep -n "fd.name" /etc/falco/falco_rules.yaml
 ```
 
-環境には、例えば次のファイルがあります。
+Container IDの出力例についても確認できます。
+
+```bash
+grep -n "container.id" /etc/falco/falco_rules.yaml
+```
+
+PriorityやTagについても、既存Ruleを参考にできます。
+
+この問題では、
 
 ```text
-falco_rules.yaml
-falco_rules.local.yaml
+要件を理解する
+        ↓
+既存Ruleを調査する
+        ↓
+必要な構文を見つける
+        ↓
+自分のRuleへ組み合わせる
 ```
 
-標準ルールファイルを直接変更するのではなく、  
-ローカルルールファイルへ独自ルールを作成します。
+という進め方が重要です。
+
+---
+
+# なぜ既存ルールを直接編集しないのか
+
+Falcoには既存のルールファイルがあります。
+
+```text
+/etc/falco/falco_rules.yaml
+```
+
+しかし、今回のカスタムルールは、
 
 ```text
 /etc/falco/falco_rules.local.yaml
 ```
 
----
+へ追加します。
 
-## 2. 何を条件として検知するか考える
-
-今回の観測対象は明確です。
+既存ルールと独自ルールを分離することで、
 
 ```text
-/dev/mem
-```
-
-したがって、
-
-```text
-ファイルアクセス
+Falco標準ルール
         ↓
-fd.name
+製品・配布側で管理
+
+独自検出ルール
         ↓
-/dev/mem
+利用環境側で管理
 ```
 
-という条件で検知します。
-
-元問題では、対象ファイルをFalcoのlistとして定義しています。
-
-```yaml
-- list: dev-file
-  items: [/dev/mem]
-```
-
-これをconditionから参照します。
+という責任分離ができます。
 
 ---
 
-## 3. 検知結果に何を出力するか考える
+# Listを作成する
 
-ここがこの問題で特に重要です。
-
-単に、
+今回検出する対象は、
 
 ```text
-/dev/memへのアクセスを検知した
-```
-
-と出力するだけでは、その後にどのPodを停止すればよいか判断できません。
-
-今回必要なのは、
-
-```text
-検知
- ↓
-コンテナ特定
- ↓
-Pod特定
+/dev/mem
 ```
 
 です。
 
-そのため、Falcoの出力に、
+これをFalcoのListとして定義します。
+
+```yaml
+- list: dev-file
+  items:
+    - /dev/mem
+```
+
+Listを利用することで、
+
+```text
+検出対象
+ ↓
+Ruleの条件へ直接埋め込む
+```
+
+のではなく、
+
+```text
+検出対象の定義
+        ↓
+List
+
+検出ロジック
+        ↓
+Rule
+```
+
+として分離できます。
+
+---
+
+# Conditionを考える
+
+今回知りたいのは、
+
+> アクセスされたファイルが`/dev/mem`か
+
+です。
+
+元問題では、この判定に`fd.name`を使用しています。
+
+したがって、
+
+```yaml
+condition: fd.name in (dev-file)
+```
+
+とします。
+
+構造として読むと、
+
+```text
+fd.name
+ ↓
+アクセスされたファイル名
+
+in
+ ↓
+指定Listに含まれているか
+
+dev-file
+ ↓
+/dev/mem
+```
+
+となります。
+
+---
+
+# Outputを考える
+
+検出するだけでは、その後の調査が難しくなります。
+
+今回の要件では、
+
+> どのコンテナで発生したのか後から調査したい
+
+ため、Container IDを出力します。
+
+Falcoでは、
 
 ```text
 %container.id
 ```
 
-を含めます。
+を利用できます。
 
-これによって、Runtimeイベントを発生させたコンテナを後から追跡できます。
+例えば、
+
+```yaml
+output: >
+  Access to devmem
+  (container_id=%container.id)
+```
+
+とします。
+
+これにより、実際にイベントが発生した場合には、対象Containerを調査するための情報を残せる構成になります。
 
 ---
 
 # 模範解答
 
-## 1. Falcoローカルルールを作成する
-
-`/etc/falco/falco_rules.local.yaml`を編集します。
-
-```bash
-vim /etc/falco/falco_rules.local.yaml
-```
-
-元問題に沿ったルール例は次の通りです。
+`/etc/falco/falco_rules.local.yaml`へ、次のカスタムルールを追加します。
 
 ```yaml
 - list: dev-file
-  items: [/dev/mem]
+  items:
+    - /dev/mem
 
 - rule: devmem
   desc: Detect access to /dev/mem
-  condition: >
-    fd.name in (dev-file)
+  condition: fd.name in (dev-file)
   output: >
-    Shell (container_id=%container.id)
+    Access to devmem
+    (container_id=%container.id)
   priority: NOTICE
-  tags: [file]
+  tags:
+    - file
 ```
 
 ---
 
-# Falcoルールを読む
+# Ruleを読む
 
 ## list
 
 ```yaml
 - list: dev-file
-  items: [/dev/mem]
+  items:
+    - /dev/mem
 ```
 
-検知対象となるファイルを定義しています。
-
-今回は、
-
-```text
-/dev/mem
-```
-
-だけが対象です。
+検出対象となるファイルを定義しています。
 
 ---
 
@@ -251,30 +287,27 @@ vim /etc/falco/falco_rules.local.yaml
 - rule: devmem
 ```
 
-作成するFalcoルールの名前です。
+カスタムRuleの名称です。
 
-ルール名自体は任意です。
+---
+
+## desc
+
+```yaml
+desc: Detect access to /dev/mem
+```
+
+Ruleが何を検出するものなのかを示します。
 
 ---
 
 ## condition
 
 ```yaml
-condition: >
-  fd.name in (dev-file)
+condition: fd.name in (dev-file)
 ```
 
-Falcoが検知する条件です。
-
-今回のルールでは、
-
-```text
-アクセス対象ファイル
-        ↓
-/dev/mem
-```
-
-であるイベントを検知します。
+アクセスされたファイル名が、`dev-file` Listに含まれているかを判定します。
 
 ---
 
@@ -282,30 +315,13 @@ Falcoが検知する条件です。
 
 ```yaml
 output: >
-  Shell (container_id=%container.id)
+  Access to devmem
+  (container_id=%container.id)
 ```
 
-検知時に出力する内容です。
+Ruleに一致した場合に出力する情報です。
 
-今回特に重要なのは、
-
-```text
-%container.id
-```
-
-です。
-
-この情報を利用して、
-
-```text
-Falcoイベント
-     ↓
-Container ID
-     ↓
-Pod
-```
-
-と追跡します。
+今回は、後続調査に利用できるようContainer IDを含めています。
 
 ---
 
@@ -315,484 +331,252 @@ Pod
 priority: NOTICE
 ```
 
-今回の問題で指定されているPriorityです。
+問題で指定されたPriorityを設定します。
 
 ---
 
-# ルールを使用してRuntimeイベントを観測する
+## tags
 
-作成したルールを使用してFalcoを実行します。  
-元問題では、30秒間実行しています。
-
-```bash
-falco -M 30 \
-  -r /etc/falco/falco_rules.local.yaml \
-  > dev.log
+```yaml
+tags:
+  - file
 ```
 
-実行後、ログを確認します。
-
-```bash
-cat dev.log
-```
-
-例えば次のような出力が得られます。
-
-```text
-11:12:50.180930443: Notice Shell (container_id=8348dccac054)
-11:12:50.184015793: Notice Shell (container_id=8348dccac054)
-```
-
-ここから、
-
-```text
-8348dccac054
-```
-
-というContainer IDを取得できます。
+ファイルアクセスに関するRuleであることを分類できるようにします。
 
 ---
 
-# Container IDからPodを特定する
+# 要件とFalco Ruleの対応
 
-次に、Container Runtime上のコンテナを確認します。
+| 要件               | Falco設定            |
+| ---------------- | ------------------ |
+| `/dev/mem`を対象とする | `list`             |
+| アクセスされたファイルを判定   | `fd.name`          |
+| List内の対象と比較      | `in (dev-file)`    |
+| 検出メッセージ          | `output`           |
+| Containerを後から特定  | `%container.id`    |
+| 重要度              | `priority: NOTICE` |
+| Rule分類           | `tags`             |
 
-```bash
-crictl ps | grep 8348dccac054
-```
-
-例えば次のように表示されます。
-
-```text
-8348dccac0549   ...   busybox   ...   cpu-65cf4d685c-lvnq
-```
-
-ここから、不審なRuntimeイベントを発生させたPodが、
+重要なのは、この対応関係です。
 
 ```text
-cpu-65cf4d685c-lvnq
+セキュリティ要件
+        ↓
+観測対象
+        ↓
+Condition
+        ↓
+検出時に必要な情報
+        ↓
+Output
 ```
-
-であることを特定できます。
 
 ---
 
-# PodからDeploymentを特定する
+# Falcoへ反映する
 
-Pod名にはReplicaSet由来の文字列が含まれるため、ある程度推測することはできます。  
-しかし、問題では観測結果を根拠として停止対象を決めるため、Owner Referenceを確認する方が確実です。
+作成したカスタムルールをFalcoが読み込める状態にします。  
+環境に用意されているFalcoの実行・再読み込み方法を確認し、カスタムルールを反映します。
 
-まずPodを確認します。
+元問題ではFalcoを起動してルールを読み込ませる手順が示されていますが、  
+実際のサービス管理方法は演習環境の構成に依存します。
 
-```bash
-kubectl get pod cpu-65cf4d685c-lvnq -o wide
-```
+この問題では、  
+**カスタムルールがFalcoから読み込める状態になっていること**  
+までを完了条件とします。
 
-管理元を確認する場合は、
+---
 
-```bash
-kubectl get pod cpu-65cf4d685c-lvnq \
-  -o jsonpath='{.metadata.ownerReferences[0].name}'
-```
+# 今回あえて実施しないこと
 
-などを利用できます。
-
-PodがReplicaSetによって管理されている場合、
+元となった問題では、この後、
 
 ```text
-Pod
+Falco Alert
  ↓
-ReplicaSet
+Container ID
  ↓
-Deployment
+crictl
+ ↓
+Pod特定
+ ↓
+Deployment特定
+ ↓
+replicas=0
 ```
 
-と管理関係をたどります。
+というインシデント対応まで続きます。
 
-例えばReplicaSetが、
+今回の演習では、ここを対象外とします。
+
+理由は、学習対象を、
 
 ```text
-cpu-65cf4d685c
-```
-
-であれば、Deploymentを確認します。
-
-```bash
-kubectl get rs cpu-65cf4d685c \
-  -o jsonpath='{.metadata.ownerReferences[0].name}'
-```
-
-今回の元問題では、最終的に、
-
-```text
-cpu
-```
-
-Deploymentが対象となっています。
-
----
-
-# Deploymentを停止する
-
-対象Deploymentが特定できたら、Replica数を`0`にします。
-
-```bash
-kubectl scale deployment cpu --replicas=0
-```
-
-この操作によって、
-
-```text
-Deployment
-    ↓
-desired replicas = 0
-    ↓
-ReplicaSet
-    ↓
-Pod停止
-```
-
-となります。
-
----
-
-# 要件と操作の対応
-
-| 要件                | 対応                           |
-| ----------------- | ---------------------------- |
-| `/dev/mem`アクセスを検知 | Falcoの`condition`            |
-| 実行主体を識別           | `%container.id`              |
-| コンテナを特定           | `crictl ps`                  |
-| Podを特定            | Container Runtime情報          |
-| Deploymentを特定     | Owner Reference              |
-| 不審Workloadを停止     | `kubectl scale --replicas=0` |
-
-この問題では、
-
-```text
-Falcoを書く
-```
-
-こと自体が目的ではありません。
-
-Falcoは、
-
-```text
-Runtimeで起きたことを観測する
-```
-
-ために使用しています。
-
----
-
-# 作業後の確認
-
-## Deploymentの状態
-
-```bash
-kubectl get deployment
-```
-
-対象Deploymentが例えば次の状態になっていることを確認します。
-
-```text
-NAME         READY   UP-TO-DATE   AVAILABLE
-amd-gpu      1/1     1            1
-cpu          0/0     0            0
-nvidia-gpu   1/1     1            1
-```
-
-重要なのは、
-
-```text
-対象Deploymentだけが0/0
-```
-
-になっていることです。
-
----
-
-## Podの状態
-
-```bash
-kubectl get pods
-```
-
-不審なPodが停止していることを確認します。
-
-同時に、他のDeploymentのPodが正常に稼働していることも確認します。
-
----
-
-# なぜPodを直接削除しないのか
-
-Deploymentによって管理されているPodを直接削除すると、
-
-```text
-Pod削除
-   ↓
-ReplicaSet
-   ↓
-desired replicasを維持
-   ↓
-新しいPodを作成
-```
-
-となります。
-
-つまり、
-
-```bash
-kubectl delete pod
-```
-
-だけでは、不審なWorkloadが再び起動する可能性があります。
-
-そのため今回は、
-
-```text
-Pod
+Runtime Eventを実際に再現すること
 ```
 
 ではなく、
 
 ```text
-Deployment
+検出要件をFalco Ruleへ変換すること
 ```
 
-側のReplica数を`0`にします。
+へ絞るためです。
 
-これによって、管理Controller自身に、
-
-```text
-Podを起動しない状態
-```
-
-を要求します。
-
----
-
-# なぜDeploymentを削除しないのか
-
-今回の目的は、
+したがって、
 
 ```text
-不審なWorkloadを封じ込める
-```
-
-ことです。
-
-Deploymentそのものを削除すると、後続調査に必要な設定情報まで失われる可能性があります。
-
-そのため、
-
-```text
-Deploymentを残す
+検出ルール設計
         ↓
-Replicaだけ0
+Rule作成
         ↓
-実行を停止
+Falcoへ反映
+────────────
+ここまでが問題03
 ```
 
-という方法を取ります。
-
-これはインシデント対応における、
-
-**Containment（封じ込め）**
-
-として考えることができます。
+となります。
 
 ---
 
 # ケーススタディ
 
-## Runtime Securityとは何を見るのか
-
-これまでの問題では、
-
-```text
-Dockerfile
-SecurityContext
-Secret
-```
-
-など、主に設定された状態を扱ってきました。
-
-Runtime Securityでは視点が変わります。
-
-```text
-設定上どうなっているか
-```
-
-だけではなく、
-
-```text
-実際にコンテナが何をしているのか
-```
-
-を観測します。
+実際のRuntime Securityでは、同じ考え方を別の異常行動にも応用できます。
 
 例えば、
 
 ```text
-通常の設定
-        ↓
-アプリケーションに脆弱性
-        ↓
-攻撃者がコード実行
-        ↓
-想定外のファイルへアクセス
+コンテナ内部で
+想定外のShellが起動した
 ```
 
-というケースでは、設定ファイルだけを確認しても攻撃を把握できないことがあります。
+場合でも、
 
-Falcoは、このようなRuntimeの挙動を観測するために使用できます。
+```text
+何が異常か
+ ↓
+Shell起動
+
+何を観測するか
+ ↓
+実行されたProcess
+
+何を条件にするか
+ ↓
+Process名など
+
+検出後に何が必要か
+ ↓
+Container / Podなどの識別情報
+```
+
+と分解できます。
+
+つまり、検出対象が変わっても、
+
+```text
+異常行動を定義
+        ↓
+観測できるEventへ変換
+        ↓
+Condition
+        ↓
+調査に必要な情報をOutput
+```
+
+という考え方は変わりません。
 
 ---
 
-# 検知だけではインシデント対応は終わらない
+# SecurityContextとの違い
 
-今回の重要な流れは、
+SecurityContextでは、
 
 ```text
-Falcoがアラートを出した
+危険な操作
+ ↓
+できないように制限する
 ```
 
-で終わらないことです。
+という方向でセキュリティを考えます。
 
-実際の対応では、
+Falcoでは、
 
 ```text
-検知
+Runtimeで発生した操作
  ↓
-何が起きたか
+観測
  ↓
-誰が起こしたか
- ↓
-どのWorkloadか
- ↓
-影響範囲はどこか
- ↓
-封じ込め
+異常な行動を検出
 ```
 
-と進める必要があります。
+します。
 
-今回の問題では、そのために、
-
-```text
-%container.id
-```
-
-を出力しています。
-
-つまりFalcoルールの`output`は、
-
-**人間が読むメッセージを表示するだけではなく、その後の調査に必要な証拠を残す場所**
-
-でもあります。
-
----
-
-# 観測点と制御点を分けて考える
-
-この問題は、
+したがって、
 
 ```text
-観測点
- ↓
-/dev/memへのアクセス
-
-制御点
- ↓
-DeploymentのReplica数
-```
-
-と整理できます。
-
-Falcoで観測する場所と、実際にWorkloadを止める場所は異なります。
-
-```text
-Runtimeイベント
+SecurityContext
         ↓
+予防・制限
+
 Falco
         ↓
-証拠取得
-        ↓
-Kubernetes Resourceを特定
-        ↓
-Deploymentを制御
+観測・検出
 ```
 
-という構造です。
+という役割の違いがあります。
 
-Runtime Securityでは、
+どちらか一方だけではなく、
 
-**「どこで異常を観測するか」と「どこで止めるか」を分けて考える**
+```text
+できることを減らす
+        +
+それでも発生した異常を検出する
+```
 
-ことが重要です。
+という多層的な防御につながります。
 
 ---
 
 # この問題で学んでほしいこと
 
-この問題で覚えてほしいのは、
+この問題で最も重要なのは、Falco RuleのYAMLを暗記することではありません。
 
-```bash
-falco -M 30
-```
-
-や、
-
-```yaml
-fd.name in (dev-file)
-```
-
-といった記述そのものだけではありません。
-
-重要なのは、
+覚えてほしいのは、
 
 ```text
-不審な動作
-    ↓
-何を観測するのか
-    ↓
-Falcoで検知
-    ↓
-追跡可能な情報を取得
-    ↓
-Container
-    ↓
-Pod
-    ↓
-Deployment
-    ↓
-封じ込め
+何を異常とするのか
+        ↓
+その行動は何として観測できるのか
+        ↓
+何を条件にすれば検出できるのか
+        ↓
+検出後の調査に何が必要なのか
+        ↓
+Falco Ruleへ変換
 ```
 
 という流れです。
 
-そして、セキュリティ対応では、
+今回なら、
 
 ```text
-怪しいから止める
+/dev/memへのアクセス
+        ↓
+ファイルアクセスを観測
+        ↓
+fd.nameで判定
+        ↓
+Containerを特定したい
+        ↓
+container.idを出力
 ```
 
-のではなく、
+となります。
 
-```text
-観測
- ↓
-証拠
- ↓
-特定
- ↓
-制御
-```
+Falcoはツール固有の知識が必要になるため、SecurityContextのように要件だけから機能名へ到達することは難しい部分があります。  
 
-と進めます。
-
-CKSでは、  
-**「Falcoのルールを書ける」ことから一段進んで、「Runtimeで発生した異常を観測し、  
-その証拠から影響範囲を特定して封じ込められる」こと**  
-をこの問題の到達点とします。
+そのためこの問題では、Falcoを使用すること自体は前提として与え、  
+**「Falcoを使うと分かった後に、検出したい行動をどのようにRuleへ変換するか」**  
+を学習の中心とします。
